@@ -1,0 +1,36 @@
+[package]
+name = "rust-audio-aec"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "audio_aec"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core dependencies
+ringbuf = "0.4"
+
+# Audio I/O - using portaudio for cross-platform support
+portaudio = "0.7"
+
+# Signal processing  
+dasp = "0.11"
+
+# Python bindings
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"] }
+
+# Threading and async
+crossbeam = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
