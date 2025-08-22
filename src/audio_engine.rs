@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use portaudio as pa;
 use std::collections::HashMap;
 
@@ -152,12 +153,17 @@ impl AudioEngine {
     }
     
     /// Read audio data from a stream
-    fn read_input(&mut self, name: String, max_samples: usize) -> PyResult<Vec<u8>> {
+    fn read_input(&mut self, py: Python, name: String, max_samples: usize) -> PyResult<Vec<u8>> {
         let stream = self.streams.get(&name)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
                 format!("Stream '{}' not found", name)
             ))?;
-        stream.read_input(max_samples)
+        
+        let py_obj = stream.read_input(py, max_samples)?;
+        
+        // Convert PyBytes back to Vec<u8>
+        let bytes = py_obj.downcast::<PyBytes>(py)?;
+        Ok(bytes.as_bytes().to_vec())
     }
     
     /// Get playback position for a stream
@@ -178,13 +184,23 @@ impl AudioEngine {
         Ok(stream.get_output_buffer_size())
     }
     
-    /// Interrupt output for a stream
-    fn interrupt_output(&self, name: String) -> PyResult<()> {
+    /// Interrupt output for a stream and return the position at which it was interrupted
+    fn interrupt_output(&self, name: String) -> PyResult<f64> {
         let stream = self.streams.get(&name)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
                 format!("Stream '{}' not found", name)
             ))?;
-        stream.interrupt_output();
+        let interrupt_position = stream.interrupt_output();
+        Ok(interrupt_position)
+    }
+    
+    /// Clear the input buffer of a stream
+    fn clear_input_buffer(&self, name: String) -> PyResult<()> {
+        let stream = self.streams.get(&name)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                format!("Stream '{}' not found", name)
+            ))?;
+        stream.clear_input_buffer();
         Ok(())
     }
     

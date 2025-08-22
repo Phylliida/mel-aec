@@ -2,7 +2,12 @@ use pyo3::prelude::*;
 
 mod audio_engine;
 mod aec;
+mod aec_trait;
+mod fdaf_aec;
+mod fdaf_aec_wrapper;
 mod buffer;
+mod sync_buffer;
+mod synchronized_aec;
 mod stream;
 
 use audio_engine::AudioEngine;

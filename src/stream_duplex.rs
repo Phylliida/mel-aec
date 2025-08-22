@@ -6,10 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::buffer::TimestampedBuffer;
-use crate::aec::{AecProcessor as WebRtcAecProcessor, AecConfig};
-use crate::aec_trait::AecProcessor;
-use crate::fdaf_aec_wrapper::FdafAecWrapper;
-use crate::synchronized_aec::RingBufferSync;
+use crate::aec::{AecProcessor, AecConfig};
 
 /// Configuration for audio streams
 #[pyclass]
@@ -25,10 +22,6 @@ pub struct StreamConfig {
     pub enable_aec: bool,
     #[pyo3(get, set)]
     pub aec_filter_length: u32,
-    #[pyo3(get, set)]
-    pub buffer_duration_seconds: u32,  // Maximum buffer duration in seconds
-    #[pyo3(get, set)]
-    pub aec_type: String,  // "webrtc" or "fdaf"
 }
 
 #[pymethods]
@@ -44,22 +37,20 @@ impl Default for StreamConfig {
         Self {
             sample_rate: 48000,  // WebRTC standard
             channels: 1,
-            buffer_size: 480,    // 10ms at 48kHz
+            buffer_size: 480,    // 10ms at 48kHz for WebRTC
             enable_aec: true,
             aec_filter_length: 2048,
-            buffer_duration_seconds: 30,  // Default to 30 seconds
-            aec_type: "fdaf".to_string(),  // Default to FDAF since WebRTC isn't working well
         }
     }
 }
 
-/// Duplex audio stream with integrated AEC using PortAudio
+/// True duplex stream with synchronized input/output
 #[pyclass]
 pub struct DuplexStream {
     // PortAudio context
     pa: Arc<Mutex<pa::PortAudio>>,
     
-    // Single duplex stream
+    // Single duplex stream for synchronized I/O
     duplex_stream: Option<Arc<Mutex<pa::Stream<pa::NonBlocking, pa::Duplex<f32, f32>>>>>,
     
     // Buffers with precise timing
@@ -69,10 +60,7 @@ pub struct DuplexStream {
     input_buffer_reader: Arc<Mutex<TimestampedBuffer>>,
     
     // AEC processor
-    aec: Option<Arc<Mutex<dyn AecProcessor>>>,
-    
-    // Synchronization for AEC
-    aec_sync: Option<Arc<Mutex<RingBufferSync>>>,
+    aec: Option<Arc<AecProcessor>>,
     
     // Stream control
     is_running: Arc<AtomicBool>,
@@ -81,8 +69,8 @@ pub struct DuplexStream {
     // Callback for processed input
     input_callback: Arc<Mutex<Option<PyObject>>>,
     
-    // Track timing
-    stream_start_time: Arc<Mutex<Option<Instant>>>,
+    // Timing tracking
+    start_time: Arc<Mutex<Option<Instant>>>,
 }
 
 #[pymethods]
@@ -95,8 +83,8 @@ impl DuplexStream {
             )
         })?;
         
-        // Create buffers - use configured duration
-        let buffer_capacity = (config.sample_rate as usize * config.buffer_duration_seconds as usize) * config.channels as usize;
+        // Create buffers with appropriate sizes
+        let buffer_capacity = (config.sample_rate as usize * 2) * config.channels as usize;
         
         let (output_writer, output_reader) = TimestampedBuffer::new(
             buffer_capacity,
@@ -109,48 +97,19 @@ impl DuplexStream {
         );
         
         // Create AEC processor if enabled
-        let aec: Option<Arc<Mutex<dyn AecProcessor>>> = if config.enable_aec {
-            match config.aec_type.as_str() {
-                "webrtc" => {
-                    let aec_config = AecConfig {
-                        sample_rate: config.sample_rate,
-                        channels: config.channels as u32,
-                        enable_aec: true,
-                        enable_agc: false,
-                        enable_ns: false,
-                    };
-                    let processor = WebRtcAecProcessor::new(aec_config).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                            format!("Failed to create WebRTC AEC: {}", e)
-                        )
-                    })?;
-                    Some(Arc::new(Mutex::new(processor)))
-                },
-                "fdaf" => {
-                    let processor = FdafAecWrapper::new(config.sample_rate, config.channels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                            format!("Failed to create FDAF AEC: {}", e)
-                        )
-                    })?;
-                    Some(Arc::new(Mutex::new(processor)))
-                },
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Unknown AEC type: {}. Use 'webrtc' or 'fdaf'", config.aec_type)
-                    ));
-                }
-            }
-        } else {
-            None
-        };
-        
-        // Create synchronization buffer if AEC is enabled
-        let aec_sync = if config.enable_aec {
-            Some(Arc::new(Mutex::new(RingBufferSync::new(
-                config.sample_rate,
-                200,  // 200ms max delay buffer
-                50,   // 50ms expected delay
-            ))))
+        let aec = if config.enable_aec {
+            let aec_config = AecConfig {
+                sample_rate: config.sample_rate,
+                channels: config.channels as u32,
+                enable_aec: true,
+                enable_agc: false,
+                enable_ns: false,
+            };
+            Some(Arc::new(AecProcessor::new(aec_config).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to create AEC: {}", e)
+                )
+            })?))
         } else {
             None
         };
@@ -163,11 +122,10 @@ impl DuplexStream {
             input_buffer_writer: Arc::new(Mutex::new(input_writer)),
             input_buffer_reader: Arc::new(Mutex::new(input_reader)),
             aec,
-            aec_sync,
             is_running: Arc::new(AtomicBool::new(false)),
             config,
             input_callback: Arc::new(Mutex::new(None)),
-            stream_start_time: Arc::new(Mutex::new(None)),
+            start_time: Arc::new(Mutex::new(None)),
         })
     }
     
@@ -192,7 +150,7 @@ impl DuplexStream {
             )
         })?;
         
-        // Get device info
+        // Get device info for latency settings
         let output_info = pa.device_info(output_device).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 format!("Failed to get output device info: {}", e)
@@ -205,7 +163,7 @@ impl DuplexStream {
             )
         })?;
         
-        // CRITICAL: Use LOW latency for precise timing
+        // Use LOW latency for precise timing!
         let output_params = pa::StreamParameters::<f32>::new(
             output_device,
             self.config.channels as i32,
@@ -220,81 +178,47 @@ impl DuplexStream {
             input_info.default_low_input_latency,    // LOW latency!
         );
         
-        // Clone references for the callback
+        // Create duplex stream callback
         let output_reader = self.output_buffer_reader.clone();
         let input_writer = self.input_buffer_writer.clone();
         let aec = self.aec.clone();
-        let aec_sync = self.aec_sync.clone();
         let input_callback_ref = self.input_callback.clone();
-        let stream_start_time = self.stream_start_time.clone();
-
+        let start_time = self.start_time.clone();
         
-        // CRITICAL: Single duplex callback for synchronized I/O
         let duplex_callback = move |pa::DuplexStreamCallbackArgs { 
             in_buffer, 
             out_buffer, 
-            frames: _,
+            frames,
             .. 
         }| {
-            // Track stream start time
-            let mut start_guard = stream_start_time.lock().unwrap();
+            // Initialize start time on first callback
+            let mut start_guard = start_time.lock().unwrap();
             if start_guard.is_none() {
                 *start_guard = Some(Instant::now());
             }
             drop(start_guard);
             
-            // First, get output data for speakers
+            // Process output (render) - what goes to speakers
             let mut output_reader = output_reader.lock().unwrap();
-            let output_samples = output_reader.read(out_buffer);
+            let samples_read = output_reader.read(out_buffer);
             
-            // Fill any remaining buffer with silence
-            for sample in &mut out_buffer[output_samples..] {
+            // Fill remainder with silence
+            for sample in &mut out_buffer[samples_read..] {
                 *sample = 0.0;
             }
             
-            // Process with AEC if enabled
+            // Process the render stream through AEC
+            if let Some(aec) = &aec {
+                if samples_read > 0 {
+                    let _ = aec.process_render(&out_buffer[..samples_read]);
+                }
+            }
+            
+            // Process input (capture) - what comes from microphone
             let processed_input = if let Some(aec) = &aec {
+                // Apply AEC to remove echo
                 let mut processed = vec![0.0f32; in_buffer.len()];
-                
-                // CRITICAL: Proper synchronization for echo cancellation
-                // The echo in the current capture comes from render samples played
-                // in the PAST (due to acoustic delay). We need to maintain a history
-                // of render samples and use the appropriate delayed samples.
-                
-                // 1. Add current render samples to history buffer
-                if let Some(sync) = &aec_sync {
-                    let mut sync_guard = sync.lock().unwrap();
-                    // Add ALL out_buffer samples, including silence padding
-                    sync_guard.push_render(out_buffer);
-                }
-                
-                // 2. Get delayed render samples that correspond to current capture
-                let synchronized_render = if let Some(sync) = &aec_sync {
-                    let sync_guard = sync.lock().unwrap();
-                    sync_guard.get_delayed_render(in_buffer.len())
-                } else {
-                    vec![0.0; in_buffer.len()]
-                };
-                
-                // 3. Process with synchronized samples
-                let mut aec_guard = aec.lock().unwrap();
-                
-                // Process the DELAYED render samples (what was playing when echo was created)
-                if let Err(e) = aec_guard.process_render(&synchronized_render) {
-                    eprintln!("AEC render error: {}", e);
-                }
-                
-                // Process current capture
-                match aec_guard.process_capture(in_buffer, &mut processed) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        eprintln!("AEC capture error: {}", e);
-                        // If AEC fails, pass through the original audio
-                        processed.copy_from_slice(in_buffer);
-                    }
-                }
-                
-                drop(aec_guard); // Release the lock
+                let _ = aec.process_capture(in_buffer, &mut processed);
                 processed
             } else {
                 in_buffer.to_vec()
@@ -320,7 +244,7 @@ impl DuplexStream {
             pa::Continue
         };
         
-        // Create duplex stream settings
+        // Create duplex stream settings with precise buffer size
         let duplex_settings = pa::DuplexStreamSettings::new(
             input_params,
             output_params,
@@ -328,7 +252,7 @@ impl DuplexStream {
             self.config.buffer_size as u32,
         );
         
-        // Open duplex stream
+        // Open the duplex stream
         let mut duplex_stream = pa.open_non_blocking_stream(
             duplex_settings,
             duplex_callback,
@@ -348,9 +272,6 @@ impl DuplexStream {
         self.duplex_stream = Some(Arc::new(Mutex::new(duplex_stream)));
         self.is_running.store(true, Ordering::SeqCst);
         
-        // Reset timing
-        *self.stream_start_time.lock().unwrap() = Some(Instant::now());
-        
         Ok(())
     }
     
@@ -368,7 +289,6 @@ impl DuplexStream {
         }
         
         self.duplex_stream = None;
-        *self.stream_start_time.lock().unwrap() = None;
         
         Ok(())
     }
@@ -411,15 +331,16 @@ impl DuplexStream {
         reader.position_seconds()
     }
     
-    /// Get the exact capture position in seconds
-    pub fn get_capture_position(&self) -> f64 {
+    /// Get the exact recording position in seconds
+    pub fn get_recording_position(&self) -> f64 {
         let writer = self.input_buffer_writer.lock().unwrap();
         writer.position_seconds()
     }
     
-    /// Get stream time since start
+    /// Get actual stream time since start
     pub fn get_stream_time(&self) -> f64 {
-        if let Some(start) = *self.stream_start_time.lock().unwrap() {
+        let start_guard = self.start_time.lock().unwrap();
+        if let Some(start) = *start_guard {
             start.elapsed().as_secs_f64()
         } else {
             0.0
@@ -432,40 +353,13 @@ impl DuplexStream {
         reader.buffered_samples()
     }
     
-    /// Clear the input buffer (useful for discarding pre-recorded audio)
-    pub fn clear_input_buffer(&self) {
-        let mut reader = self.input_buffer_reader.lock().unwrap();
-        // Read and discard all available samples
-        let available = reader.buffered_samples();
-        if available > 0 {
-            let mut discard = vec![0.0f32; available];
-            reader.read(&mut discard);
-        }
-    }
-    
     /// Interrupt/clear the output buffer
     pub fn interrupt_output(&self) -> f64 {
         let position = self.get_playback_position();
         
         let mut reader = self.output_buffer_reader.lock().unwrap();
-        // Clear the buffer by draining all samples
-        let available = reader.buffered_samples();
-        if available > 0 {
-            let mut drain = vec![0.0f32; available];
-            reader.read(&mut drain);
-        }
+        reader.clear();
         
         position
-    }
-    
-    /// Set a callback for processed input data
-    pub fn set_input_callback(&mut self, callback: PyObject) -> PyResult<()> {
-        *self.input_callback.lock().unwrap() = Some(callback);
-        Ok(())
-    }
-    
-    /// Check if the stream is currently running
-    pub fn is_active(&self) -> bool {
-        self.is_running.load(Ordering::SeqCst)
     }
 }

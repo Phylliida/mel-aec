@@ -6,10 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::buffer::TimestampedBuffer;
-use crate::aec::{AecProcessor as WebRtcAecProcessor, AecConfig};
-use crate::aec_trait::AecProcessor;
-use crate::fdaf_aec_wrapper::FdafAecWrapper;
-use crate::synchronized_aec::RingBufferSync;
+use crate::aec::{AecProcessor, AecConfig};
 
 /// Configuration for audio streams
 #[pyclass]
@@ -25,10 +22,6 @@ pub struct StreamConfig {
     pub enable_aec: bool,
     #[pyo3(get, set)]
     pub aec_filter_length: u32,
-    #[pyo3(get, set)]
-    pub buffer_duration_seconds: u32,  // Maximum buffer duration in seconds
-    #[pyo3(get, set)]
-    pub aec_type: String,  // "webrtc" or "fdaf"
 }
 
 #[pymethods]
@@ -47,8 +40,6 @@ impl Default for StreamConfig {
             buffer_size: 480,    // 10ms at 48kHz
             enable_aec: true,
             aec_filter_length: 2048,
-            buffer_duration_seconds: 30,  // Default to 30 seconds
-            aec_type: "fdaf".to_string(),  // Default to FDAF since WebRTC isn't working well
         }
     }
 }
@@ -69,10 +60,7 @@ pub struct DuplexStream {
     input_buffer_reader: Arc<Mutex<TimestampedBuffer>>,
     
     // AEC processor
-    aec: Option<Arc<Mutex<dyn AecProcessor>>>,
-    
-    // Synchronization for AEC
-    aec_sync: Option<Arc<Mutex<RingBufferSync>>>,
+    aec: Option<Arc<AecProcessor>>,
     
     // Stream control
     is_running: Arc<AtomicBool>,
@@ -95,8 +83,8 @@ impl DuplexStream {
             )
         })?;
         
-        // Create buffers - use configured duration
-        let buffer_capacity = (config.sample_rate as usize * config.buffer_duration_seconds as usize) * config.channels as usize;
+        // Create buffers
+        let buffer_capacity = (config.sample_rate as usize * 2) * config.channels as usize;
         
         let (output_writer, output_reader) = TimestampedBuffer::new(
             buffer_capacity,
@@ -109,48 +97,19 @@ impl DuplexStream {
         );
         
         // Create AEC processor if enabled
-        let aec: Option<Arc<Mutex<dyn AecProcessor>>> = if config.enable_aec {
-            match config.aec_type.as_str() {
-                "webrtc" => {
-                    let aec_config = AecConfig {
-                        sample_rate: config.sample_rate,
-                        channels: config.channels as u32,
-                        enable_aec: true,
-                        enable_agc: false,
-                        enable_ns: false,
-                    };
-                    let processor = WebRtcAecProcessor::new(aec_config).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                            format!("Failed to create WebRTC AEC: {}", e)
-                        )
-                    })?;
-                    Some(Arc::new(Mutex::new(processor)))
-                },
-                "fdaf" => {
-                    let processor = FdafAecWrapper::new(config.sample_rate, config.channels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                            format!("Failed to create FDAF AEC: {}", e)
-                        )
-                    })?;
-                    Some(Arc::new(Mutex::new(processor)))
-                },
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Unknown AEC type: {}. Use 'webrtc' or 'fdaf'", config.aec_type)
-                    ));
-                }
-            }
-        } else {
-            None
-        };
-        
-        // Create synchronization buffer if AEC is enabled
-        let aec_sync = if config.enable_aec {
-            Some(Arc::new(Mutex::new(RingBufferSync::new(
-                config.sample_rate,
-                200,  // 200ms max delay buffer
-                50,   // 50ms expected delay
-            ))))
+        let aec = if config.enable_aec {
+            let aec_config = AecConfig {
+                sample_rate: config.sample_rate,
+                channels: config.channels as u32,
+                enable_aec: true,
+                enable_agc: false,
+                enable_ns: false,
+            };
+            Some(Arc::new(AecProcessor::new(aec_config).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to create AEC: {}", e)
+                )
+            })?))
         } else {
             None
         };
@@ -163,7 +122,6 @@ impl DuplexStream {
             input_buffer_writer: Arc::new(Mutex::new(input_writer)),
             input_buffer_reader: Arc::new(Mutex::new(input_reader)),
             aec,
-            aec_sync,
             is_running: Arc::new(AtomicBool::new(false)),
             config,
             input_callback: Arc::new(Mutex::new(None)),
@@ -224,16 +182,14 @@ impl DuplexStream {
         let output_reader = self.output_buffer_reader.clone();
         let input_writer = self.input_buffer_writer.clone();
         let aec = self.aec.clone();
-        let aec_sync = self.aec_sync.clone();
         let input_callback_ref = self.input_callback.clone();
         let stream_start_time = self.stream_start_time.clone();
-
         
         // CRITICAL: Single duplex callback for synchronized I/O
         let duplex_callback = move |pa::DuplexStreamCallbackArgs { 
             in_buffer, 
             out_buffer, 
-            frames: _,
+            frames,
             .. 
         }| {
             // Track stream start time
@@ -252,49 +208,17 @@ impl DuplexStream {
                 *sample = 0.0;
             }
             
-            // Process with AEC if enabled
+            // CRITICAL: Process render through AEC BEFORE capture
+            if let Some(aec) = &aec {
+                if output_samples > 0 {
+                    let _ = aec.process_render(&out_buffer[..output_samples]);
+                }
+            }
+            
+            // Now process capture with AEC (echo should be removed)
             let processed_input = if let Some(aec) = &aec {
                 let mut processed = vec![0.0f32; in_buffer.len()];
-                
-                // CRITICAL: Proper synchronization for echo cancellation
-                // The echo in the current capture comes from render samples played
-                // in the PAST (due to acoustic delay). We need to maintain a history
-                // of render samples and use the appropriate delayed samples.
-                
-                // 1. Add current render samples to history buffer
-                if let Some(sync) = &aec_sync {
-                    let mut sync_guard = sync.lock().unwrap();
-                    // Add ALL out_buffer samples, including silence padding
-                    sync_guard.push_render(out_buffer);
-                }
-                
-                // 2. Get delayed render samples that correspond to current capture
-                let synchronized_render = if let Some(sync) = &aec_sync {
-                    let sync_guard = sync.lock().unwrap();
-                    sync_guard.get_delayed_render(in_buffer.len())
-                } else {
-                    vec![0.0; in_buffer.len()]
-                };
-                
-                // 3. Process with synchronized samples
-                let mut aec_guard = aec.lock().unwrap();
-                
-                // Process the DELAYED render samples (what was playing when echo was created)
-                if let Err(e) = aec_guard.process_render(&synchronized_render) {
-                    eprintln!("AEC render error: {}", e);
-                }
-                
-                // Process current capture
-                match aec_guard.process_capture(in_buffer, &mut processed) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        eprintln!("AEC capture error: {}", e);
-                        // If AEC fails, pass through the original audio
-                        processed.copy_from_slice(in_buffer);
-                    }
-                }
-                
-                drop(aec_guard); // Release the lock
+                let _ = aec.process_capture(in_buffer, &mut processed);
                 processed
             } else {
                 in_buffer.to_vec()
@@ -432,28 +356,12 @@ impl DuplexStream {
         reader.buffered_samples()
     }
     
-    /// Clear the input buffer (useful for discarding pre-recorded audio)
-    pub fn clear_input_buffer(&self) {
-        let mut reader = self.input_buffer_reader.lock().unwrap();
-        // Read and discard all available samples
-        let available = reader.buffered_samples();
-        if available > 0 {
-            let mut discard = vec![0.0f32; available];
-            reader.read(&mut discard);
-        }
-    }
-    
     /// Interrupt/clear the output buffer
     pub fn interrupt_output(&self) -> f64 {
         let position = self.get_playback_position();
         
         let mut reader = self.output_buffer_reader.lock().unwrap();
-        // Clear the buffer by draining all samples
-        let available = reader.buffered_samples();
-        if available > 0 {
-            let mut drain = vec![0.0f32; available];
-            reader.read(&mut drain);
-        }
+        reader.clear();
         
         position
     }
