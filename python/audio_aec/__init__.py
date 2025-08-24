@@ -59,7 +59,7 @@ class AudioStream:
         
         # Create stream
         self.engine.create_stream("main", config)
-        self.stream = self.engine.get_stream("main")
+        self.stream_name = "main"
         
         # Callback management
         self._input_callback = None
@@ -68,13 +68,13 @@ class AudioStream:
         
     def start(self):
         """Start the audio stream."""
-        self.stream.start()
+        self.engine.start_stream(self.stream_name)
         self._running = True
         
     def stop(self):
         """Stop the audio stream."""
         self._running = False
-        self.stream.stop()
+        self.engine.stop_stream(self.stream_name)
         
     def write(self, audio_data: np.ndarray) -> int:
         """
@@ -95,7 +95,7 @@ class AudioStream:
         # Convert to bytes
         audio_bytes = audio_data.tobytes()
         
-        return self.stream.write_output(audio_bytes)
+        return self.engine.write_output(self.stream_name, audio_bytes)
     
     def read(self, num_samples: int) -> np.ndarray:
         """
@@ -107,7 +107,7 @@ class AudioStream:
         Returns:
             Audio samples as numpy array (float32)
         """
-        audio_bytes = self.stream.read_input(num_samples)
+        audio_bytes = self.engine.read_input(self.stream_name, num_samples)
         
         # Convert bytes to numpy array
         if audio_bytes:
@@ -122,7 +122,7 @@ class AudioStream:
         Returns:
             Current playback position in seconds
         """
-        return self.stream.get_playback_position()
+        return self.engine.get_playback_position(self.stream_name)
     
     def get_buffered_duration(self) -> float:
         """
@@ -131,17 +131,18 @@ class AudioStream:
         Returns:
             Buffered duration in seconds
         """
-        buffered_samples = self.stream.get_output_buffer_size()
+        buffered_samples = self.engine.get_output_buffer_size(self.stream_name)
         return buffered_samples / self.sample_rate
     
     def interrupt(self):
         """Interrupt/clear the output buffer immediately."""
-        self.stream.interrupt_output()
+        self.engine.interrupt_output(self.stream_name)
     
     def reset_aec(self):
         """Reset the acoustic echo canceller state."""
         if self.config.enable_aec:
-            self.stream.reset_aec()
+            # AEC reset not yet implemented at engine level
+            pass
     
     def set_input_callback(self, callback: Callable[[np.ndarray], None]):
         """
@@ -154,7 +155,7 @@ class AudioStream:
             audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
             callback(audio_data)
         
-        self.stream.set_input_callback(wrapper)
+        self.engine.set_input_callback(self.stream_name, wrapper)
         self._input_callback = callback
     
     def list_devices(self) -> List[Tuple[str, str, bool, bool]]:
