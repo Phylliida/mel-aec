@@ -56,8 +56,8 @@ impl AecProcessor {
         let mut init_config = InitializationConfig::default();
         init_config.num_capture_channels = config.channels as i32;
         init_config.num_render_channels = config.channels as i32;
-        // Set sample rate if the field exists
-        // init_config.sample_rate_hz = sample_rate as i32;
+        // Note: sample_rate_hz field doesn't exist in InitializationConfig
+        // The WebRTC library infers it from the frame size
 
         // Create processor
         let mut processor = Processor::new(&init_config)?;
@@ -65,10 +65,12 @@ impl AecProcessor {
         // Configure echo cancellation
         let echo_cancellation = if config.enable_aec {
             Some(EchoCancellation {
-                suppression_level: EchoCancellationSuppressionLevel::High,
+                suppression_level: EchoCancellationSuppressionLevel::Moderate,
                 enable_delay_agnostic: true,  // Handle variable delays automatically
                 enable_extended_filter: true,  // Better echo suppression
-                stream_delay_ms: Some(50),  // Typical delay for macOS audio (can be tuned)
+                // Provide no explicit stream delay; we feed render frames in real time
+                // and avoid double-compensating delay via external sync buffers.
+                stream_delay_ms: None,
             })
         } else {
             None
@@ -153,6 +155,12 @@ impl AecProcessor {
         for (chunk_idx, chunk) in input.chunks_exact(self.frame_size).enumerate() {
             // Copy chunk to buffer
             capture_buffer[..chunk.len()].copy_from_slice(chunk);
+            
+            // Debug: verify buffer size before processing
+            if capture_buffer.len() != self.frame_size {
+                eprintln!("WARNING: capture_buffer.len()={} != frame_size={}", 
+                         capture_buffer.len(), self.frame_size);
+            }
             
             // Process capture stream with AEC (modifies the buffer)
             processor.process_capture_frame(&mut capture_buffer)?;

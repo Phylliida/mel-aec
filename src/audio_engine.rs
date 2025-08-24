@@ -203,6 +203,24 @@ impl AudioEngine {
         stream.clear_input_buffer();
         Ok(())
     }
+
+    /// Get last observed absolute input peak for diagnostics
+    fn get_input_peak(&self, name: String) -> PyResult<f32> {
+        let stream = self.streams.get(&name)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                format!("Stream '{}' not found", name)
+            ))?;
+        Ok(stream.get_last_input_peak())
+    }
+    
+    /// Set input callback for a stream
+    fn set_input_callback(&mut self, name: String, callback: PyObject) -> PyResult<()> {
+        let stream = self.streams.get_mut(&name)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                format!("Stream '{}' not found", name)
+            ))?;
+        stream.set_input_callback(callback)
+    }
     
     /// Remove a stream
     fn remove_stream(&mut self, name: String) -> PyResult<()> {
