@@ -214,9 +214,9 @@ impl DuplexStream {
         }
         
         let pa = self.pa.lock().unwrap();
-        
         // Choose output device: preferred by name or default
         let output_device = if let Some(name) = &self.config.output_device {
+            println!("Attempting to use output device '{}'", name);
             let mut found: Option<pa::DeviceIndex> = None;
             for dev in pa.devices().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to enumerate devices: {}", e)))? {
                 let (idx, info) = dev.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to get device info: {}", e)))?;
@@ -225,17 +225,31 @@ impl DuplexStream {
                     break;
                 }
             }
-            found.ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Output device not found: {}", name)))?
+            if let Some(found_idx) = found {
+                found_idx
+            } else {
+                println!("Potential output devices:");
+                for dev in pa.devices().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to enumerate devices: {}", e)))? {
+                    let (_idx, info) = dev.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to get device info: {}", e)))?;
+                    if info.max_output_channels > 0 {
+                        println!("  \"{}\"", info.name);
+                    }
+                }
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Output device not found: {}", name)
+                ));
+            }
         } else {
             pa.default_output_device().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                format!("Failed to get default output device: {}", e)
-            )
-        })?
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to get default output device: {}", e)
+                )
+            })?
         };
         
         // Choose input device: preferred by name or default
         let input_device = if let Some(name) = &self.config.input_device {
+            println!("Attempting to use input device '{}'", name);
             let mut found: Option<pa::DeviceIndex> = None;
             for dev in pa.devices().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to enumerate devices: {}", e)))? {
                 let (idx, info) = dev.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to get device info: {}", e)))?;
@@ -244,13 +258,26 @@ impl DuplexStream {
                     break;
                 }
             }
-            found.ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Input device not found: {}", name)))?
+            if let Some(found_idx) = found {
+                found_idx
+            } else {
+                println!("Potential input devices:");
+                for dev in pa.devices().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to enumerate devices: {}", e)))? {
+                    let (_idx, info) = dev.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to get device info: {}", e)))?;
+                    if info.max_input_channels > 0 {
+                        println!("  \"{}\"", info.name);
+                    }
+                }
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Input device not found: {}", name)
+                ));
+            }
         } else {
             pa.default_input_device().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                format!("Failed to get default input device: {}", e)
-            )
-        })?
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to get default input device: {}", e)
+                )
+            })?
         };
         
         // Get device info

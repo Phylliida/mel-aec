@@ -32,6 +32,8 @@ class AudioStream:
         buffer_size: int = 256,
         enable_aec: bool = True,
         aec_filter_length: int = 2048,
+        input_device: str = None,
+        output_device: str = None,
     ):
         """
         Initialize audio stream.
@@ -42,6 +44,8 @@ class AudioStream:
             buffer_size: Buffer size in samples (default 256)
             enable_aec: Enable acoustic echo cancellation (default True)
             aec_filter_length: AEC filter length in samples (default 2048)
+            input_device: Name of the input device (optional)
+            output_device: Name of the output device (optional)
         """
         self.engine = AudioEngine()
         
@@ -52,6 +56,8 @@ class AudioStream:
         config.buffer_size = buffer_size
         config.enable_aec = enable_aec
         config.aec_filter_length = aec_filter_length
+        config.input_device = input_device
+        config.output_device = output_device
         
         self.config = config
         self.sample_rate = sample_rate
@@ -238,7 +244,9 @@ class TtsStreamPlayer:
 # Convenience functions
 def create_duplex_stream(
     sample_rate: int = 16000,
-    enable_aec: bool = True
+    enable_aec: bool = True,
+    input_device: str = None,
+    output_device: str = None
 ) -> AudioStream:
     """
     Create a duplex audio stream with sensible defaults.
@@ -255,7 +263,9 @@ def create_duplex_stream(
         channels=1,
         buffer_size=256,
         enable_aec=enable_aec,
-        aec_filter_length=2048
+        aec_filter_length=2048,
+        input_device=input_device,
+        output_device=output_device
     )
 
 
