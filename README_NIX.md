@@ -89,3 +89,15 @@ print(stream.list_devices())
 ```
 
 If you see some devices, everything is installed correctly.
+
+Troubleshooting:
+
+- Maturin segfaults:
+
+Need to reinstall maturin, fix-python can break it:
+
+```bash
+uv pip uninstall maturin
+rm -rf ~/.cache/
+uv pip install maturin
+```
