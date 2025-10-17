@@ -70,7 +70,7 @@ maturin develop --release
 ```bash
 cd ..
 nix shell github:GuillaumeDesforges/fix-python
-fix-python -venv ./.venv
+fix-python --venv ./.venv
 ```
 
 9. Now you can use audio_aec! Enjoy. Next time you start a terminal, just do
