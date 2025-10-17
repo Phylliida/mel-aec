@@ -164,12 +164,12 @@ class AudioStream:
         self.engine.set_input_callback(self.stream_name, wrapper)
         self._input_callback = callback
     
-    def list_devices(self) -> List[Tuple[str, str, bool, bool]]:
+    def list_devices(self) -> List[Tuple[str, str, bool, bool, List[float], List[float]]]:
         """
         List available audio devices.
         
         Returns:
-            List of tuples (name, type, is_input, is_output)
+            List of tuples (name, type, is_input, is_output, input_sample_rates, output_sample_rates)
         """
         return self.engine.list_devices()
     
