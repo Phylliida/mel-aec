@@ -17,6 +17,9 @@ portaudio = "0.7"
 # Signal processing  
 dasp = "0.11"
 
+# Platform utilities
+libc = "0.2"
+
 # AEC - Using WebRTC's production-ready implementation
 webrtc-audio-processing = { version = "0.4", features = ["bundled"] }
 

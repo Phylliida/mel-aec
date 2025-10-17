@@ -3,6 +3,9 @@ use pyo3::types::PyBytes;
 use portaudio as pa;
 use std::collections::HashMap;
 
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
+
 use crate::stream::{DuplexStream, StreamConfig};
 
 const COMMON_SAMPLE_RATES: [f64; 13] = [
@@ -85,11 +88,13 @@ impl AudioEngine {
         for channels in channel_counts {
             let params =
                 pa::StreamParameters::<f32>::new(device, channels as i32, true, latency);
-            let result = if is_input {
-                self.pa.is_input_format_supported(params, rate)
-            } else {
-                self.pa.is_output_format_supported(params, rate)
-            };
+            let result = suppress_portaudio_errors(|| {
+                if is_input {
+                    self.pa.is_input_format_supported(params, rate)
+                } else {
+                    self.pa.is_output_format_supported(params, rate)
+                }
+            });
 
             if result.is_ok() {
                 return true;
@@ -389,5 +394,64 @@ impl AudioEngine {
         }
         
         Ok(info)
+    }
+}
+
+fn suppress_portaudio_errors<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::io::AsRawFd;
+        use std::panic::{self, AssertUnwindSafe};
+
+        static STDERR_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = STDERR_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let stderr_fd = libc::STDERR_FILENO;
+        let backup_fd = unsafe { libc::dup(stderr_fd) };
+        if backup_fd < 0 {
+            drop(lock);
+            return f();
+        }
+
+        let null_file = match OpenOptions::new().write(true).open("/dev/null") {
+            Ok(file) => file,
+            Err(_) => {
+                unsafe {
+                    libc::close(backup_fd);
+                }
+                drop(lock);
+                return f();
+            }
+        };
+
+        if unsafe { libc::dup2(null_file.as_raw_fd(), stderr_fd) } < 0 {
+            unsafe {
+                libc::close(backup_fd);
+            }
+            drop(lock);
+            return f();
+        }
+
+        let result = panic::catch_unwind(AssertUnwindSafe(f));
+
+        unsafe {
+            libc::dup2(backup_fd, stderr_fd);
+            libc::close(backup_fd);
+        }
+        drop(lock);
+
+        match result {
+            Ok(value) => value,
+            Err(err) => panic::resume_unwind(err),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        f()
     }
 }
