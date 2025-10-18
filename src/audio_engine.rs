@@ -32,6 +32,77 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    fn supported_sample_rates(
+        &self,
+        device: pa::DeviceIndex,
+        max_channels: i32,
+        latency: pa::Time,
+        default_rate: f64,
+        is_input: bool,
+    ) -> Vec<f64> {
+        if max_channels <= 0 {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<f64> = COMMON_SAMPLE_RATES.iter().copied().collect();
+        if default_rate.is_finite() && default_rate > 0.0 {
+            candidates.push(default_rate);
+        }
+        candidates.retain(|rate| rate.is_finite() && *rate > 0.0);
+        candidates.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        candidates.dedup();
+
+        candidates
+            .into_iter()
+            .filter(|&rate| {
+                self.is_sample_rate_supported(device, max_channels, latency, rate, is_input)
+            })
+            .collect()
+    }
+
+    fn is_sample_rate_supported(
+        &self,
+        device: pa::DeviceIndex,
+        max_channels: i32,
+        latency: pa::Time,
+        rate: f64,
+        is_input: bool,
+    ) -> bool {
+        let max_channels = if max_channels < 0 {
+            0
+        } else {
+            max_channels as usize
+        };
+
+        if max_channels == 0 {
+            return false;
+        }
+
+        let mut channel_counts: Vec<usize> = (1..=max_channels.min(8)).collect();
+        if max_channels > 8 {
+            channel_counts.push(max_channels);
+        }
+        channel_counts.sort_unstable();
+        channel_counts.dedup();
+
+        for channels in channel_counts {
+            let params =
+                pa::StreamParameters::<f32>::new(device, channels as i32, true, latency);
+            let result = suppress_portaudio_errors(|| {
+                if is_input {
+                    self.pa.is_input_format_supported(params, rate)
+                } else {
+                    self.pa.is_output_format_supported(params, rate)
+                }
+            });
+
+            if result.is_ok() {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 #[pymethods]
@@ -323,79 +394,6 @@ impl AudioEngine {
         }
         
         Ok(info)
-    }
-
-
-    fn supported_sample_rates(
-        &self,
-        device: pa::DeviceIndex,
-        max_channels: i32,
-        latency: pa::Time,
-        default_rate: f64,
-        is_input: bool,
-    ) -> Vec<f64> {
-        if max_channels <= 0 {
-            return Vec::new();
-        }
-
-        let mut candidates: Vec<f64> = COMMON_SAMPLE_RATES.iter().copied().collect();
-        if default_rate.is_finite() && default_rate > 0.0 {
-            candidates.push(default_rate);
-        }
-        candidates.retain(|rate| rate.is_finite() && *rate > 0.0);
-        candidates.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        candidates.dedup();
-
-        candidates
-            .into_iter()
-            .filter(|&rate| {
-                self.is_sample_rate_supported(device, max_channels, latency, rate, is_input)
-            })
-            .collect()
-    }
-
-    fn is_sample_rate_supported(
-        &self,
-        device: pa::DeviceIndex,
-        max_channels: i32,
-        latency: pa::Time,
-        rate: f64,
-        is_input: bool,
-    ) -> bool {
-        let max_channels = if max_channels < 0 {
-            0
-        } else {
-            max_channels as usize
-        };
-
-        if max_channels == 0 {
-            return false;
-        }
-
-        let mut channel_counts: Vec<usize> = (1..=max_channels.min(8)).collect();
-        if max_channels > 8 {
-            channel_counts.push(max_channels);
-        }
-        channel_counts.sort_unstable();
-        channel_counts.dedup();
-
-        for channels in channel_counts {
-            let params =
-                pa::StreamParameters::<f32>::new(device, channels as i32, true, latency);
-            let result = suppress_portaudio_errors(|| {
-                if is_input {
-                    self.pa.is_input_format_supported(params, rate)
-                } else {
-                    self.pa.is_output_format_supported(params, rate)
-                }
-            });
-
-            if result.is_ok() {
-                return true;
-            }
-        }
-
-        false
     }
 }
 
