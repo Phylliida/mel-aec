@@ -114,12 +114,19 @@ class AudioStream:
             Audio samples as numpy array (float32)
         """
         audio_bytes = self.engine.read_input(self.stream_name, num_samples)
-        
-        # Convert bytes to numpy array
-        if audio_bytes:
-            return np.frombuffer(audio_bytes, dtype=np.float32)
-        else:
+
+        if not audio_bytes:
             return np.array([], dtype=np.float32)
+
+        if isinstance(audio_bytes, (bytes, bytearray, memoryview)):
+            return np.frombuffer(audio_bytes, dtype=np.float32)
+        if isinstance(audio_bytes, np.ndarray):
+            return audio_bytes.astype(np.float32, copy=False)
+        if isinstance(audio_bytes, list):
+            return np.asarray(audio_bytes, dtype=np.float32)
+
+        # Fallback to ensure we always return float32 samples
+        return np.asarray(audio_bytes, dtype=np.float32)
     
     def get_playback_position(self) -> float:
         """
