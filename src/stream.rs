@@ -52,7 +52,7 @@ impl Default for StreamConfig {
             buffer_size: 480,    // 10ms at 48kHz
             enable_aec: true,
             aec_filter_length: 2048,
-            buffer_duration_seconds: 30,  // Default to 30 seconds
+            buffer_duration_seconds: 60*10,  // Default to10 minutes
             aec_type: "webrtc".to_string(),  // Default to WebRTC (production-grade)
             input_device: None,
             output_device: None,
