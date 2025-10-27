@@ -76,7 +76,7 @@ maturin build --release
 ### Platform-specific Notes
 
 **macOS**: Requires CoreAudio (included with macOS)
-**Linux**: Requires ALSA development files (`libasound2-dev` on Ubuntu/Debian)
+**Linux**: Requires ALSA development files (`libasound2-dev` on Ubuntu/Debian). If on nix, see [nix instructions](README_NIX.md).
 **Windows**: Requires WASAPI (included with Windows)
 
 ## Usage

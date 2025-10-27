@@ -3,13 +3,106 @@ use pyo3::types::PyBytes;
 use portaudio as pa;
 use std::collections::HashMap;
 
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
+
 use crate::stream::{DuplexStream, StreamConfig};
+
+const COMMON_SAMPLE_RATES: [f64; 13] = [
+    8000.0,
+    11025.0,
+    12000.0,
+    16000.0,
+    22050.0,
+    24000.0,
+    32000.0,
+    44100.0,
+    48000.0,
+    88200.0,
+    96000.0,
+    176400.0,
+    192000.0,
+];
 
 /// Main audio engine that manages devices and streams
 #[pyclass]
 pub struct AudioEngine {
     streams: HashMap<String, DuplexStream>,
     pa: pa::PortAudio,
+}
+
+impl AudioEngine {
+    fn supported_sample_rates(
+        &self,
+        device: pa::DeviceIndex,
+        max_channels: i32,
+        latency: pa::Time,
+        default_rate: f64,
+        is_input: bool,
+    ) -> Vec<f64> {
+        if max_channels <= 0 {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<f64> = COMMON_SAMPLE_RATES.iter().copied().collect();
+        if default_rate.is_finite() && default_rate > 0.0 {
+            candidates.push(default_rate);
+        }
+        candidates.retain(|rate| rate.is_finite() && *rate > 0.0);
+        candidates.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        candidates.dedup();
+
+        candidates
+            .into_iter()
+            .filter(|&rate| {
+                self.is_sample_rate_supported(device, max_channels, latency, rate, is_input)
+            })
+            .collect()
+    }
+
+    fn is_sample_rate_supported(
+        &self,
+        device: pa::DeviceIndex,
+        max_channels: i32,
+        latency: pa::Time,
+        rate: f64,
+        is_input: bool,
+    ) -> bool {
+        let max_channels = if max_channels < 0 {
+            0
+        } else {
+            max_channels as usize
+        };
+
+        if max_channels == 0 {
+            return false;
+        }
+
+        let mut channel_counts: Vec<usize> = (1..=max_channels.min(8)).collect();
+        if max_channels > 8 {
+            channel_counts.push(max_channels);
+        }
+        channel_counts.sort_unstable();
+        channel_counts.dedup();
+
+        for channels in channel_counts {
+            let params =
+                pa::StreamParameters::<f32>::new(device, channels as i32, true, latency);
+            let result = suppress_portaudio_errors(|| {
+                if is_input {
+                    self.pa.is_input_format_supported(params, rate)
+                } else {
+                    self.pa.is_output_format_supported(params, rate)
+                }
+            });
+
+            if result.is_ok() {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 #[pymethods]
@@ -29,7 +122,9 @@ impl AudioEngine {
     }
     
     /// List available audio devices
-    fn list_devices(&self) -> PyResult<Vec<(String, String, bool, bool)>> {
+    fn list_devices(
+        &self,
+    ) -> PyResult<Vec<(String, String, bool, bool, Vec<f64>, Vec<f64>)>> {
         let mut devices = Vec::new();
         
         // Get default devices for reference
@@ -52,6 +147,30 @@ impl AudioEngine {
             let is_input = info.max_input_channels > 0;
             let is_output = info.max_output_channels > 0;
             
+            let input_sample_rates = if is_input {
+                self.supported_sample_rates(
+                    idx,
+                    info.max_input_channels,
+                    info.default_low_input_latency,
+                    info.default_sample_rate,
+                    true,
+                )
+            } else {
+                Vec::new()
+            };
+
+            let output_sample_rates = if is_output {
+                self.supported_sample_rates(
+                    idx,
+                    info.max_output_channels,
+                    info.default_low_output_latency,
+                    info.default_sample_rate,
+                    false,
+                )
+            } else {
+                Vec::new()
+            };
+
             let device_type = if Some(idx) == default_input && Some(idx) == default_output {
                 "default_duplex"
             } else if Some(idx) == default_input {
@@ -66,7 +185,14 @@ impl AudioEngine {
                 "output"
             };
             
-            devices.push((name.to_string(), device_type.to_string(), is_input, is_output));
+            devices.push((
+                name.to_string(),
+                device_type.to_string(),
+                is_input,
+                is_output,
+                input_sample_rates,
+                output_sample_rates,
+            ));
         }
         
         Ok(devices)
@@ -268,5 +394,65 @@ impl AudioEngine {
         }
         
         Ok(info)
+    }
+}
+
+// portaudio gets confused when polling for sample rates, this hides those confusions
+fn suppress_portaudio_errors<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::io::AsRawFd;
+        use std::panic::{self, AssertUnwindSafe};
+
+        static STDERR_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = STDERR_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let stderr_fd = libc::STDERR_FILENO;
+        let backup_fd = unsafe { libc::dup(stderr_fd) };
+        if backup_fd < 0 {
+            drop(lock);
+            return f();
+        }
+
+        let null_file = match OpenOptions::new().write(true).open("/dev/null") {
+            Ok(file) => file,
+            Err(_) => {
+                unsafe {
+                    libc::close(backup_fd);
+                }
+                drop(lock);
+                return f();
+            }
+        };
+
+        if unsafe { libc::dup2(null_file.as_raw_fd(), stderr_fd) } < 0 {
+            unsafe {
+                libc::close(backup_fd);
+            }
+            drop(lock);
+            return f();
+        }
+
+        let result = panic::catch_unwind(AssertUnwindSafe(f));
+
+        unsafe {
+            libc::dup2(backup_fd, stderr_fd);
+            libc::close(backup_fd);
+        }
+        drop(lock);
+
+        match result {
+            Ok(value) => value,
+            Err(err) => panic::resume_unwind(err),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        f()
     }
 }

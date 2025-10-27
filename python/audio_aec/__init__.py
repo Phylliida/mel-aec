@@ -32,6 +32,8 @@ class AudioStream:
         buffer_size: int = 256,
         enable_aec: bool = True,
         aec_filter_length: int = 2048,
+        input_device: str = None,
+        output_device: str = None,
     ):
         """
         Initialize audio stream.
@@ -42,6 +44,8 @@ class AudioStream:
             buffer_size: Buffer size in samples (default 256)
             enable_aec: Enable acoustic echo cancellation (default True)
             aec_filter_length: AEC filter length in samples (default 2048)
+            input_device: Name of the input device (optional)
+            output_device: Name of the output device (optional)
         """
         self.engine = AudioEngine()
         
@@ -52,6 +56,8 @@ class AudioStream:
         config.buffer_size = buffer_size
         config.enable_aec = enable_aec
         config.aec_filter_length = aec_filter_length
+        config.input_device = input_device
+        config.output_device = output_device
         
         self.config = config
         self.sample_rate = sample_rate
@@ -108,12 +114,19 @@ class AudioStream:
             Audio samples as numpy array (float32)
         """
         audio_bytes = self.engine.read_input(self.stream_name, num_samples)
-        
-        # Convert bytes to numpy array
-        if audio_bytes:
-            return np.frombuffer(audio_bytes, dtype=np.float32)
-        else:
+
+        if not audio_bytes:
             return np.array([], dtype=np.float32)
+
+        if isinstance(audio_bytes, (bytes, bytearray, memoryview)):
+            return np.frombuffer(audio_bytes, dtype=np.float32)
+        if isinstance(audio_bytes, np.ndarray):
+            return audio_bytes.astype(np.float32, copy=False)
+        if isinstance(audio_bytes, list):
+            return np.asarray(audio_bytes, dtype=np.float32)
+
+        # Fallback to ensure we always return float32 samples
+        return np.asarray(audio_bytes, dtype=np.float32)
     
     def get_playback_position(self) -> float:
         """
@@ -158,12 +171,12 @@ class AudioStream:
         self.engine.set_input_callback(self.stream_name, wrapper)
         self._input_callback = callback
     
-    def list_devices(self) -> List[Tuple[str, str, bool, bool]]:
+    def list_devices(self) -> List[Tuple[str, str, bool, bool, List[float], List[float]]]:
         """
         List available audio devices.
         
         Returns:
-            List of tuples (name, type, is_input, is_output)
+            List of tuples (name, type, is_input, is_output, input_sample_rates, output_sample_rates)
         """
         return self.engine.list_devices()
     
@@ -238,7 +251,9 @@ class TtsStreamPlayer:
 # Convenience functions
 def create_duplex_stream(
     sample_rate: int = 16000,
-    enable_aec: bool = True
+    enable_aec: bool = True,
+    input_device: str = None,
+    output_device: str = None
 ) -> AudioStream:
     """
     Create a duplex audio stream with sensible defaults.
@@ -255,7 +270,9 @@ def create_duplex_stream(
         channels=1,
         buffer_size=256,
         enable_aec=enable_aec,
-        aec_filter_length=2048
+        aec_filter_length=2048,
+        input_device=input_device,
+        output_device=output_device
     )
 
 
